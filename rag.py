@@ -28,7 +28,7 @@ COLLECTION_NAME = "rag_documents"
 
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 
-LLM_MODEL = "openai/gpt-oss-120b"
+LLM_MODEL = "llama-3.3-70b-versatile"
 
 CHUNK_SIZE = 800
 
@@ -374,7 +374,7 @@ ANSWER:
     )
 
     answer = response.choices[0].message.content
-    return answer
+    
 
 
 # =========================================================
