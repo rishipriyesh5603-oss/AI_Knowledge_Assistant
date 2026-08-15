@@ -1,6 +1,2 @@
 streamlit
-chromadb
-sentence-transformers
-pypdf
-ollama
-python-dotenv
+requests

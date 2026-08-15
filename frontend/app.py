@@ -1,26 +1,32 @@
 import os
-import sys
+import requests
 import tempfile
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
 import streamlit as st
 
-from auth import (
-    register_user,
-    login_user
-)
+BACKEND_URL = os.getenv(
+    "BACKEND_URL",
+    "https://ai-knowledge-assistant-1-po9j.onrender.com"
+).rstrip("/")
+st.write("BACKEND URL:", BACKEND_URL)
 
-from rag import (
-    process_pdf,
-    search_documents,
-    generate_answer,
-    get_user_chunk_count,
-    get_user_sources,
-    delete_user_documents
-)
+def get_documents(user_id):
+    try:
+        response = requests.get(
+            f"{BACKEND_URL}/documents/{user_id}",
+            timeout=60
+        )
 
+        if response.status_code == 200:
+            data = response.json()
+            return (
+                data.get("documents", []),
+                data.get("chunk_count", 0)
+            )
+
+    except requests.RequestException:
+        pass
+
+    return [], 0
 
 # =========================================================
 # PAGE CONFIG
@@ -697,30 +703,54 @@ if not st.session_state.authenticated:
 
             else:
 
-                user = login_user(
-                    username,
-                    password
-                )
-
-                if user:
-
-                    st.session_state.authenticated = True
-
-                    st.session_state.user = user
-
-                    st.session_state.messages = []
-
-                    st.session_state.processed_files = (
-                        get_user_sources(user["id"])
+                try:
+                    response = requests.post(
+                        f"{BACKEND_URL}/auth/login",
+                        json={
+                            "username": username,
+                            "password": password
+                        },
+                        timeout=60
                     )
 
-                    st.rerun()
+                    if response.status_code == 200:
+                        user = response.json().get("user")
 
-                else:
+                        if user:
+                            st.session_state.authenticated = True
+                            st.session_state.user = user
+                            st.session_state.messages = []
 
-                    st.error(
-                        "Invalid username/email or password."
-                    )
+                            st.session_state.processed_files = (
+                                get_documents(user["id"])[0]
+                            )
+
+                            st.rerun()
+                        else:
+                            st.error("Login failed.")
+
+                    elif response.status_code == 401:
+                        st.error("Invalid username/email or password.")
+
+                    else:
+                        try:
+                            error_data = response.json()
+                            error_message = error_data.get(
+                                "detail",
+                                f"Login failed. Server returned {response.status_code}."
+                            )
+                        except ValueError:
+                            error_message = (
+                                f"Login failed. Server returned {response.status_code} "
+                                f"with non-JSON response."
+                            )
+
+                        st.error(error_message)
+
+                except requests.RequestException as e:
+                    st.error(f"Could not connect to backend: {e}")
+
+
 
 
     # =====================================================
@@ -795,23 +825,43 @@ if not st.session_state.authenticated:
 
             else:
 
-                success, message = register_user(
-                    new_username,
-                    new_email,
-                    new_password
-                )
-
-                if success:
-
-                    st.success(message)
-
-                    st.info(
-                        "Your account is ready. Go to Login."
+                try:
+                    response = requests.post(
+                        f"{BACKEND_URL}/auth/register",
+                        json={
+                            "username": new_username,
+                            "email": new_email,
+                            "password": new_password
+                        },
+                        timeout=60
                     )
 
-                else:
+                    if response.status_code == 200:
+                        data = response.json()
 
-                    st.error(message)
+                        st.success(
+                            data.get(
+                                "message",
+                                "Account created successfully."
+                            )
+                        )
+
+                        st.info(
+                            "Your account is ready. Go to Login."
+                        )
+
+                    else:
+                        st.error(
+                            response.json().get(
+                                "detail",
+                                "Registration failed."
+                            )
+                        )
+
+                except requests.RequestException as e:
+                    st.error(
+                        f"Could not connect to backend: {e}"
+                    )
 
 # =========================================================
 # CURRENT USER
@@ -928,12 +978,43 @@ with st.sidebar:
 
                 try:
 
-                    chunks = process_pdf(
-                        temp_path,
-                        user_id
-                    )
+                    with open(temp_path, "rb") as pdf_file:
 
-                    total_chunks += chunks
+                        response = requests.post(
+                            f"{BACKEND_URL}/documents/upload/{user_id}",
+                            files={
+                                "file": (
+                                    uploaded_file.name,
+                                    pdf_file,
+                                    "application/pdf"
+                                )
+                            },
+                            timeout=300
+                        )
+
+                    if response.status_code == 200:
+
+                        data = response.json()
+
+                        chunks = data.get("chunks", 0)
+
+                        total_chunks += chunks
+
+                    else:
+
+                        try:
+                            error_message = response.json().get(
+                                "detail",
+                                f"Document upload failed. Server returned {response.status_code}."
+                            )
+                        except ValueError:
+                            error_message = (
+                                f"Document upload failed. Server returned "
+                                f"{response.status_code}."
+                            )
+
+                        st.error(error_message)
+                        chunks = 0
 
                 finally:
 
@@ -951,7 +1032,7 @@ with st.sidebar:
             )
 
             st.session_state.processed_files = (
-                get_user_sources(user_id)
+                get_documents(user_id)
             )
 
 
@@ -961,8 +1042,7 @@ with st.sidebar:
 
     st.divider()
 
-    sources = get_user_sources(user_id)
-
+    sources, chunk_count = get_documents(user_id)
     st.markdown(
         f"### 📚 Your Files ({len(sources)})"
     )
@@ -1021,9 +1101,7 @@ with st.sidebar:
 # MAIN PAGE
 # =========================================================
 
-chunk_count = get_user_chunk_count(user_id)
-
-sources = get_user_sources(user_id)
+sources, chunk_count = get_documents(user_id)
 
 
 # =========================================================
@@ -1080,7 +1158,7 @@ with metric3:
 with metric4:
     st.metric(
         "MODEL",
-        "LLAMA 3.2"
+        "LLAMA 3.3 70B"
     )
 
 
@@ -1152,17 +1230,50 @@ if st.session_state.current_page == "Documents":
             type="secondary"
         ):
 
-            deleted = delete_user_documents(
-                user_id
-            )
+            try:
 
-            st.session_state.processed_files = []
+                response = requests.delete(
+                    f"{BACKEND_URL}/documents/{user_id}",
+                    timeout=60
+                )
 
-            st.success(
-                f"Deleted {deleted} chunks."
-            )
+                if response.status_code == 200:
 
-            st.rerun()
+                    deleted = response.json().get(
+                        "deleted_chunks",
+                        0
+                    )
+
+                    st.session_state.processed_files = []
+
+                    st.success(
+                        f"Deleted {deleted} chunks."
+                    )
+
+                    st.rerun()
+
+                else:
+                    try:
+                        error_message = response.json().get(
+                            "detail",
+                            f"Failed to delete documents. "
+                            f"Server returned {response.status_code}."
+                        )
+                    except ValueError:
+                        error_message = (
+                            f"Failed to delete documents. "
+                            f"Server returned {response.status_code}."
+                        )
+
+                    st.error(error_message)
+
+            except requests.RequestException as e:
+
+                st.error(
+                    f"Could not connect to backend: {e}"
+                )
+
+                st.rerun()
 
     else:
 
@@ -1411,20 +1522,34 @@ else:
 
                     try:
 
-                        retrieved_documents = (
-                            search_documents(
-                                question,
-                                user_id
+                        response = requests.post(
+                            f"{BACKEND_URL}/chat",
+                            json={
+                                "user_id": user_id,
+                                "question": question
+                            },
+                            timeout=180
+                        )
+
+                        if response.status_code != 200:
+                            raise Exception(
+                                response.json().get(
+                                    "detail",
+                                    "RAG request failed."
+                                )
                             )
+
+                        data = response.json()
+
+                        answer = data.get(
+                            "answer",
+                            "No answer returned."
                         )
 
-
-                        answer = generate_answer(
-                            question,
-                            retrieved_documents
+                        retrieved_documents = data.get(
+                            "sources",
+                            []
                         )
-
-
                         st.markdown(
                             answer
                         )
