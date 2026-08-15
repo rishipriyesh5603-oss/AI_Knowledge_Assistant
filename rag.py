@@ -4,9 +4,13 @@ import hashlib
 from dotenv import load_dotenv
 from groq import Groq
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import HashingVectorizer
 import chromadb
 
+
+# =========================================================
+# ENVIRONMENT
+# =========================================================
 
 load_dotenv()
 
@@ -15,6 +19,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is not configured")
 
+# IMPORTANT:
+# Use the actual environment variable, NOT "GROQ_API_KEY"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 
@@ -26,7 +32,9 @@ CHROMA_PATH = "./chroma_db"
 
 COLLECTION_NAME = "rag_documents"
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+# Lightweight local embedding configuration.
+# This does NOT download a model and uses very little RAM.
+EMBEDDING_DIMENSION = 384
 
 LLM_MODEL = "llama-3.3-70b-versatile"
 
@@ -38,13 +46,34 @@ TOP_K = 5
 
 
 # =========================================================
-# MODELS
+# LIGHTWEIGHT EMBEDDINGS
 # =========================================================
 
-embedding_model = SentenceTransformer(
-    EMBEDDING_MODEL
+embedding_model = HashingVectorizer(
+    n_features=EMBEDDING_DIMENSION,
+    alternate_sign=False,
+    norm="l2",
+    lowercase=True,
+    ngram_range=(1, 2)
 )
 
+
+def create_embeddings(texts):
+    """
+    Convert text into lightweight fixed-size vectors.
+
+    This replaces SentenceTransformer.
+    It does not download any ML model.
+    """
+
+    vectors = embedding_model.transform(texts)
+
+    return vectors.toarray().tolist()
+
+
+# =========================================================
+# CHROMADB
+# =========================================================
 
 chroma_client = chromadb.PersistentClient(
     path=CHROMA_PATH
@@ -160,6 +189,7 @@ def process_pdf(
 
     ids = []
 
+
     for page_data in pages:
 
         page_number = page_data["page"]
@@ -169,6 +199,7 @@ def process_pdf(
         chunks = create_chunks(
             page_text
         )
+
 
         for chunk_index, chunk in enumerate(
             chunks
@@ -191,20 +222,23 @@ def process_pdf(
                 "page": page_number,
 
                 "chunk": chunk_index
+
             })
 
             ids.append(
                 document_id
             )
 
-    if not documents:
 
+    if not documents:
         return 0
 
-    embeddings = embedding_model.encode(
-        documents,
-        normalize_embeddings=True
-    ).tolist()
+
+    # Create lightweight embeddings
+    embeddings = create_embeddings(
+        documents
+    )
+
 
     collection.upsert(
 
@@ -215,7 +249,9 @@ def process_pdf(
         embeddings=embeddings,
 
         metadatas=metadatas
+
     )
+
 
     return len(documents)
 
@@ -230,10 +266,11 @@ def search_documents(
     top_k=TOP_K
 ):
 
-    query_embedding = embedding_model.encode(
-        [query],
-        normalize_embeddings=True
-    )[0].tolist()
+    # Create embedding for the question
+    query_embedding = create_embeddings(
+        [query]
+    )[0]
+
 
     results = collection.query(
 
@@ -246,19 +283,24 @@ def search_documents(
         where={
             "user_id": str(user_id)
         }
+
     )
+
 
     documents = results.get(
         "documents",
         [[]]
     )[0]
 
+
     metadatas = results.get(
         "metadatas",
         [[]]
     )[0]
 
+
     combined_results = []
+
 
     for document, metadata in zip(
         documents,
@@ -278,13 +320,15 @@ def search_documents(
                 "page",
                 "Unknown"
             )
+
         })
+
 
     return combined_results
 
 
 # =========================================================
-# GENERATE ANSWER
+# GENERATE ANSWER USING GROQ
 # =========================================================
 
 def generate_answer(
@@ -299,7 +343,9 @@ def generate_answer(
             "in your uploaded documents."
         )
 
+
     context_parts = []
+
 
     for index, item in enumerate(
         retrieved_documents,
@@ -319,9 +365,11 @@ Content:
 """
         )
 
+
     context = "\n".join(
         context_parts
     )
+
 
     prompt = f"""
 You are a professional RAG AI assistant.
@@ -349,11 +397,20 @@ USER QUESTION:
 ANSWER:
 """
 
+
+    # =====================================================
+    # GROQ API CALL
+    # =====================================================
+
     response = groq_client.chat.completions.create(
+
         model=LLM_MODEL,
+
         messages=[
+
             {
                 "role": "system",
+
                 "content": (
                     "You are a helpful RAG AI assistant. "
                     "Answer the user's question using only the "
@@ -364,17 +421,25 @@ ANSWER:
                     "the answer in the uploaded documents."
                 )
             },
+
             {
                 "role": "user",
+
                 "content": prompt
             }
+
         ],
+
         temperature=0.2,
+
         max_completion_tokens=1024
+
     )
 
+
     answer = response.choices[0].message.content
-    
+
+    return answer
 
 
 # =========================================================
@@ -386,10 +451,13 @@ def get_user_chunk_count(
 ):
 
     results = collection.get(
+
         where={
             "user_id": str(user_id)
         }
+
     )
+
 
     return len(
         results.get(
@@ -412,14 +480,18 @@ def get_user_sources(
         where={
             "user_id": str(user_id)
         }
+
     )
+
 
     metadatas = results.get(
         "metadatas",
         []
     )
 
+
     sources = set()
+
 
     for metadata in metadatas:
 
@@ -430,7 +502,11 @@ def get_user_sources(
             )
 
             if source:
-                sources.add(source)
+
+                sources.add(
+                    source
+                )
+
 
     return sorted(
         sources
@@ -450,12 +526,15 @@ def delete_user_documents(
         where={
             "user_id": str(user_id)
         }
+
     )
+
 
     ids = results.get(
         "ids",
         []
     )
+
 
     if ids:
 
@@ -463,5 +542,5 @@ def delete_user_documents(
             ids=ids
         )
 
-    return len(ids)
 
+    return len(ids)
